@@ -1,5 +1,6 @@
 package com.manager.TODO.DTO;
 
+import com.manager.TODO.Models.Importance;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -18,6 +19,12 @@ public class TaskDTO {
     private String description;
 
     private LocalDateTime deadline;
+
+    private LocalDateTime createdAt;
+
+    private LocalDateTime completedAt;
+
+    private Importance importance;
 
     private boolean completed;
 }
