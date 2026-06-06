@@ -35,13 +35,19 @@ public class JwtFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getServletPath();
+        
         if (path == null) {
             return false;
         }
         if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
             return true;
         }
-        return path.startsWith("/api/auth/") || path.equals("/api/auth") || path.startsWith("/login/");
+        // Updated to accurately catch routes missing the "/api" prefix inside Docker containers
+        return path.startsWith("/api/auth/")
+                || path.startsWith("/auth/")
+                || path.equals("/api/auth")
+                || path.equals("/auth")
+                || path.startsWith("/login/");
     }
 
     @Override

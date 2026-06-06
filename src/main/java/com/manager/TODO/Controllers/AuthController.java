@@ -1,11 +1,12 @@
 package com.manager.TODO.Controllers;
 
 import com.manager.TODO.Models.LoginRequest;
-import com.manager.TODO.Models.RegisterUserRequest; // Imported new DTO
-import com.manager.TODO.Models.UpdateUserRequest;
+import com.manager.TODO.Models.RegisterUserRequest;
 import com.manager.TODO.Models.User;
 import com.manager.TODO.Repository.UserRepository;
 import com.manager.TODO.Services.JwtService;
+import com.manager.TODO.Services.MailService;
+import com.manager.TODO.Services.OtpService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -35,6 +36,12 @@ public class AuthController {
     @Autowired
     private PasswordEncoder encoder;
 
+    @Autowired
+    private OtpService otpService;
+
+    @Autowired
+    private MailService mailService;
+
     @GetMapping("/test")
     public String test() {
         return "Working";
@@ -50,6 +57,7 @@ public class AuthController {
 
     @PostMapping("/register")
     public ResponseEntity<?> registerUser(@RequestBody RegisterUserRequest request) { // Updated parameter
+        try{
         // 1. Validate incoming data
         if (request.getUsername() == null || request.getUsername().trim().isEmpty()) {
             return ResponseEntity.badRequest().body("Error: Username is required!");
@@ -69,23 +77,65 @@ public class AuthController {
             return ResponseEntity.badRequest().body("Error: Email is already registered!");
         }
 
-        // 3. Map DTO data to User entity
+        // Pre-encrypt password so we store it securely in Redis cache
+        request.setPassword(encoder.encode(request.getPassword()));
+
+        // 3. Generate OTP and cache registration data in Redis
+        String otp = otpService.generateAndSaveOtp(request.getEmail(), request);
+
+        // 4. Dispatch verification mail via Resend
+        mailService.sendOtpEmail(request.getEmail(), otp);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("message", "OTP sent to your email. Please verify to complete registration.");
+        response.put("email", request.getEmail());
+        return ResponseEntity.ok(response);}
+        catch (Exception e){
+            // This forces the explicit Java crash to print clearly in your Docker log window
+            System.err.println("=== REGISTRATION ERROR DETECTED ===");
+            e.printStackTrace();
+            System.err.println("====================================");
+
+            return ResponseEntity.status(500).body("Error details: " + e.getMessage());
+        }
+    }
+
+
+    @PostMapping("/verify-register-otp")
+    public ResponseEntity<?> verifyRegisterOtp(@RequestBody com.manager.TODO.Models.VerifyOtpRequest request) {
+        String savedOtp = otpService.getSavedOtp(request.getEmail());
+
+        if (savedOtp == null) {
+            return ResponseEntity.badRequest().body("Error: OTP expired or invalid registration session.");
+        }
+
+        if (!savedOtp.equals(request.getOtp())) {
+            return ResponseEntity.badRequest().body("Error: Incorrect OTP code.");
+        }
+
+        // Fetch temporary data out of Redis cache
+        RegisterUserRequest pendingUser = otpService.getPendingRegistration(request.getEmail());
+        if (pendingUser == null) {
+            return ResponseEntity.badRequest().body("Error: Registration session timed out.");
+        }
+
+        // Map to MySQL User Object
         User newUser = new User();
-        newUser.setUsername(request.getUsername());
-        newUser.setEmail(request.getEmail());
+        newUser.setUsername(pendingUser.getUsername());
+        newUser.setEmail(pendingUser.getEmail());
+        newUser.setPassword(pendingUser.getPassword()); // already encrypted
 
-        // Encrypt the password securely
-        newUser.setPassword(encoder.encode(request.getPassword()));
-
-        // 4. Save to Database
+        // Persist to DB
         User savedUser = userRepository.save(newUser);
 
-        // 5. Generate Token for Automatic Login
+        // Cleanup Redis session keys
+        otpService.clearOtpAndRegistration(request.getEmail());
+
+        // Generate auto-login JWT token
         String token = jwtService.generateToken(savedUser.getUsername());
 
-        // 6. Build response payload matching your frontend structure
         Map<String, Object> response = new HashMap<>();
-        response.put("message", "User registered successfully!");
+        response.put("message", "Account verified and registered successfully!");
         response.put("token", token);
         response.put("user", buildUserResponse(savedUser));
 
@@ -138,44 +188,54 @@ public class AuthController {
         return ResponseEntity.ok(buildUserResponse(user));
     }
 
-    @PutMapping("/update/{id}")
-    public ResponseEntity<?> updateUser(@PathVariable Long id, @RequestBody UpdateUserRequest request) {
-        User existingUser = userRepository.findById(id).orElse(null);
-
-        if (existingUser == null) {
-            Map<String, String> error = new HashMap<>();
-            error.put("message", "User not found");
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    @PostMapping("/forgot-password")
+    public ResponseEntity<?> forgotPassword(@RequestBody com.manager.TODO.Models.ForgotPasswordRequest request) {
+        // 1. Verify if the email actually exists in your MySQL DB
+        java.util.Optional<User> userOpt = userRepository.findByEmail(request.getEmail());
+        if (userOpt.isEmpty()) {
+            // Security Best Practice: Don't explicitly reveal if an email doesn't exist.
+            // Just say "If the email exists, an OTP has been sent."
+            return ResponseEntity.ok("If the account exists, an OTP has been sent to your email.");
         }
 
-        if (request.getUsername() != null && !request.getUsername().isEmpty()) {
-            User existingByUsername = userRepository.findByUsername(request.getUsername()).orElse(null);
+        // 2. Generate Reset OTP and save to Redis
+        String otp = otpService.generateAndSaveResetOtp(request.getEmail());
 
-            if (existingByUsername != null && !existingByUsername.getId().equals(id)) {
-                Map<String, String> error = new HashMap<>();
-                error.put("message", "Username already taken");
-                return ResponseEntity.badRequest().body(error);
-            }
-            existingUser.setUsername(request.getUsername());
+        // 3. Send email via Resend
+        mailService.sendOtpEmail(request.getEmail(), otp);
+        // Note: You can customize mailService to say "Reset Password OTP" instead of "Registration" if you prefer!
+
+        return ResponseEntity.ok("OTP sent to your email for password resetting.");
+    }
+
+    @PostMapping("/reset-password")
+    public ResponseEntity<?> resetPassword(@RequestBody com.manager.TODO.Models.ResetPasswordSubmitRequest request) {
+        // 1. Validate inputs
+        if (request.getNewPassword() == null || request.getNewPassword().trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Error: New password is required.");
         }
 
-        if (request.getPassword() != null && !request.getPassword().isEmpty()) {
-            existingUser.setPassword(encoder.encode(request.getPassword()));
+        // 2. Fetch OTP from Redis
+        String savedOtp = otpService.getResetOtp(request.getEmail());
+        if (savedOtp == null) {
+            return ResponseEntity.badRequest().body("Error: OTP expired or invalid session.");
         }
 
-        if (request.getEmail() != null && !request.getEmail().isEmpty()) {
-            existingUser.setEmail(request.getEmail());
+        // 3. Verify OTP matches
+        if (!savedOtp.equals(request.getOtp())) {
+            return ResponseEntity.badRequest().body("Error: Incorrect OTP code.");
         }
 
-        userRepository.save(existingUser);
+        // 4. Update password in MySQL database
+        User user = userRepository.findByEmail(request.getEmail())
+                .orElseThrow(() -> new RuntimeException("User not found during password reset step."));
 
-        String newToken = jwtService.generateToken(existingUser.getUsername());
+        user.setPassword(encoder.encode(request.getNewPassword()));
+        userRepository.save(user);
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("message", "User updated successfully");
-        response.put("user", buildUserResponse(existingUser));
-        response.put("token", newToken);
+        // 5. Clean up Redis OTP
+        otpService.clearResetOtp(request.getEmail());
 
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok("Password reset successfully! You can now log in with your new password.");
     }
 }
