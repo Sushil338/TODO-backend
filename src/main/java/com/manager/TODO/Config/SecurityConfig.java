@@ -26,7 +26,7 @@ import java.util.List;
 @EnableWebSecurity()
 public class SecurityConfig {
 
-    @Value("${app.cors.allowed-origin:http://localhost:5173}")
+    @Value("${app.cors.allowed-origin}")
     private String allowedOrigin;
 
     // 1. Inject your custom user details service
@@ -82,7 +82,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of(allowedOrigin, "http://localhost"));
+        configuration.setAllowedOrigins(List.of(allowedOrigin, "http://16.170.236.230"));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);
