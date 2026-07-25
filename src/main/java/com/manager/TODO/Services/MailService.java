@@ -27,7 +27,7 @@ public class MailService {
             headers.setBearerAuth(apiKey);
 
             Map<String, Object> body = new HashMap<>();
-            body.put("from", "TaskManager <onboarding@resend.dev>"); // Replace with your domain later
+            body.put("from", "Todo App <notifications@thetodo.site>"); // Replace with your domain later
             body.put("to", new String[]{toEmail});
             body.put("subject", "Verify Your Account - OTP");
             body.put("html", "<h3>Welcome to TaskManager!</h3><p>Your verification code is: <strong>" + otp + "</strong></p><p>This OTP expires in 15 minutes.</p>");
